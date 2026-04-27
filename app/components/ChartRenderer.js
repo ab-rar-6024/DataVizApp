@@ -9,7 +9,7 @@ import {
   Platform,
   ActivityIndicator,
 } from 'react-native';
-import { Text, Surface, IconButton } from 'react-native-paper';
+import { Text, Surface } from 'react-native-paper';
 import {
   LineChart,
   BarChart,
@@ -17,9 +17,7 @@ import {
 } from 'react-native-chart-kit';
 import Svg, { Circle, G, Line, Text as SvgText, Rect } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
-import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
 
 import { downsampleData } from '../utils/fileParser';
 
@@ -63,20 +61,16 @@ const truncateLabel = (label, max = 7) => {
 };
 
 // ─── Axis Label Wrapper ───────────────────────────────────────────────────────
-// Wraps a chart with visible X and Y axis titles
 
 const AxisLabels = ({ xLabel, yLabel, children }) => (
   <View style={axisStyles.container}>
-    {/* Y-axis label (rotated vertically) */}
     <View style={axisStyles.yLabelContainer}>
       <Text style={axisStyles.yLabel} numberOfLines={1}>
         {yLabel}
       </Text>
     </View>
-
     <View style={axisStyles.chartArea}>
       {children}
-      {/* X-axis label */}
       <View style={axisStyles.xLabelContainer}>
         <Text style={axisStyles.xLabel} numberOfLines={1}>
           {xLabel}
@@ -176,13 +170,11 @@ const ChartRenderer = ({
   const viewShotRef = useRef(null);
   const [saving, setSaving] = useState(false);
 
-  // Downsample for performance
   const { xData: sampledX, yData: sampledY } = useMemo(() => {
     const maxPoints = chartType === 'pie' ? 8 : 15;
     return downsampleData(xData, yData, maxPoints);
   }, [xData, yData, chartType]);
 
-  // Guard
   if (!sampledX || sampledX.length === 0) {
     return (
       <Surface style={styles.emptyChart} elevation={1}>
@@ -191,8 +183,6 @@ const ChartRenderer = ({
     );
   }
 
-  // ── Sizing ──
-  // Leave room for Y-axis label (20px) + padding
   const chartWidth = screenWidth - 72;
   const chartHeight = 220;
 
@@ -210,10 +200,20 @@ const ChartRenderer = ({
     legend: [yLabel],
   };
 
-  // ── Save / Share ──
+  // ── Direct Save to Gallery (no share sheet) ──
   const handleSave = async () => {
     try {
       setSaving(true);
+
+      // Request permission
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Permission Required',
+          'Please allow media access in your device settings to save charts.',
+        );
+        return;
+      }
 
       // Capture chart as PNG
       const uri = await viewShotRef.current.capture({
@@ -221,25 +221,11 @@ const ChartRenderer = ({
         quality: 1,
       });
 
-      const canShare = await Sharing.isAvailableAsync();
+      // Save directly to gallery
+      const asset = await MediaLibrary.createAssetAsync(uri);
+      await MediaLibrary.createAlbumAsync('DataVizApp', asset, false);
 
-      if (canShare) {
-        // Share sheet (works on both iOS and Android)
-        await Sharing.shareAsync(uri, {
-          mimeType: 'image/png',
-          dialogTitle: `Share ${title || 'Chart'}`,
-        });
-      } else {
-        // Fallback: save to device gallery
-        const { status } = await MediaLibrary.requestPermissionsAsync();
-        if (status !== 'granted') {
-          Alert.alert('Permission required', 'Allow media access to save charts.');
-          return;
-        }
-        const asset = await MediaLibrary.createAssetAsync(uri);
-        await MediaLibrary.createAlbumAsync('DataVizApp', asset, false);
-        Alert.alert('Saved!', 'Chart saved to your gallery (DataVizApp album).');
-      }
+      Alert.alert('✅ Saved!', 'Chart has been saved to your gallery in the "DataVizApp" album.');
     } catch (err) {
       console.error('Save error:', err);
       Alert.alert('Error', 'Could not save the chart. Please try again.');
@@ -384,7 +370,6 @@ const ChartRenderer = ({
         options={{ format: 'png', quality: 1 }}
         style={styles.viewShot}
       >
-        {/* White background so PNG looks clean */}
         <View style={styles.captureBackground}>
           {title ? (
             <Text style={styles.captureTitle}>{title}</Text>
@@ -399,7 +384,7 @@ const ChartRenderer = ({
         </View>
       </ViewShot>
 
-      {/* Download / Share button */}
+      {/* Download button — saves directly, no share sheet */}
       <DownloadButton onPress={handleSave} loading={saving} />
     </Surface>
   );
@@ -428,15 +413,18 @@ const ScatterPlot = ({ xData, yData, width, height }) => {
   const xTicks = [0, 1, 2, 3, 4].map((i) => xMin + (i / 4) * xRange);
   const yTicks = [0, 1, 2, 3, 4].map((i) => yMin + (i / 4) * yRange);
 
-  const fmt = (v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : Number.isInteger(v) ? v : v.toFixed(1));
+  const fmt = (v) =>
+    Math.abs(v) >= 1000
+      ? `${(v / 1000).toFixed(1)}k`
+      : Number.isInteger(v)
+      ? v
+      : v.toFixed(1);
 
   return (
     <Svg width={width} height={height}>
       <G>
-        {/* Background */}
         <Rect x={padding.left} y={padding.top} width={plotW} height={plotH} fill="#faf8ff" rx={6} />
 
-        {/* Horizontal grid lines */}
         {yTicks.map((t, i) => (
           <Line
             key={`hg-${i}`}
@@ -450,7 +438,6 @@ const ScatterPlot = ({ xData, yData, width, height }) => {
           />
         ))}
 
-        {/* Vertical grid lines */}
         {xTicks.map((t, i) => (
           <Line
             key={`vg-${i}`}
@@ -464,26 +451,21 @@ const ScatterPlot = ({ xData, yData, width, height }) => {
           />
         ))}
 
-        {/* Y-axis */}
         <Line x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top + plotH} stroke="#bbb" strokeWidth={1.5} />
-        {/* X-axis */}
         <Line x1={padding.left} y1={padding.top + plotH} x2={padding.left + plotW} y2={padding.top + plotH} stroke="#bbb" strokeWidth={1.5} />
 
-        {/* Y tick labels */}
         {yTicks.map((t, i) => (
           <SvgText key={`yl-${i}`} x={padding.left - 6} y={scaleY(t) + 4} fontSize={9} fill="#777" textAnchor="end">
             {fmt(t)}
           </SvgText>
         ))}
 
-        {/* X tick labels */}
         {xTicks.map((t, i) => (
           <SvgText key={`xl-${i}`} x={scaleX(t)} y={padding.top + plotH + 14} fontSize={9} fill="#777" textAnchor="middle">
             {fmt(t)}
           </SvgText>
         ))}
 
-        {/* Data points with a subtle drop-shadow ring */}
         {xData.map((x, i) => (
           <G key={`pt-${i}`}>
             <Circle cx={scaleX(x)} cy={scaleY(yData[i])} r={6} fill="#6200ee" opacity={0.15} />
