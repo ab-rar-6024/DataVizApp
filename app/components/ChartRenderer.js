@@ -1,69 +1,188 @@
-import React, { useMemo } from 'react';
-import { View, Dimensions, StyleSheet, ScrollView } from 'react-native';
-import { Text, Surface } from 'react-native-paper';
+import React, { useMemo, useRef, useState } from 'react';
+import {
+  View,
+  Dimensions,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Alert,
+  Platform,
+  ActivityIndicator,
+} from 'react-native';
+import { Text, Surface, IconButton } from 'react-native-paper';
 import {
   LineChart,
   BarChart,
   PieChart,
 } from 'react-native-chart-kit';
-import Svg, { Circle, G, Line, Text as SvgText } from 'react-native-svg';
+import Svg, { Circle, G, Line, Text as SvgText, Rect } from 'react-native-svg';
+import ViewShot from 'react-native-view-shot';
+import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
+import * as FileSystem from 'expo-file-system';
 
 import { downsampleData } from '../utils/fileParser';
 
 const screenWidth = Dimensions.get('window').width;
 
-// Shared chart configuration for react-native-chart-kit
+// ─── Chart Config ────────────────────────────────────────────────────────────
+
 const baseChartConfig = {
   backgroundColor: '#ffffff',
   backgroundGradientFrom: '#ffffff',
-  backgroundGradientTo: '#ffffff',
-  decimalPlaces: 2,
+  backgroundGradientTo: '#f8f5ff',
+  decimalPlaces: 1,
   color: (opacity = 1) => `rgba(98, 0, 238, ${opacity})`,
   labelColor: (opacity = 1) => `rgba(60, 60, 60, ${opacity})`,
   style: { borderRadius: 16 },
   propsForDots: {
-    r: '4',
+    r: '5',
     strokeWidth: '2',
     stroke: '#6200ee',
   },
   propsForBackgroundLines: {
-    stroke: '#e0e0e0',
-    strokeDasharray: '4 4',
+    stroke: '#ede8f8',
+    strokeDasharray: '5 4',
+  },
+  propsForLabels: {
+    fontSize: 10,
+    fontFamily: Platform.OS === 'ios' ? 'Helvetica Neue' : 'sans-serif',
   },
 };
 
-// Colors used for pie slices
 const PIE_COLORS = [
   '#6200ee', '#03dac6', '#ff6b6b', '#ffa502', '#2ed573',
   '#1e90ff', '#ff4757', '#a29bfe', '#fdcb6e', '#00cec9',
 ];
 
-/**
- * Truncates long labels so the chart axis stays readable.
- */
-const truncateLabel = (label, max = 8) => {
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const truncateLabel = (label, max = 7) => {
   const str = String(label);
   return str.length > max ? str.slice(0, max) + '…' : str;
 };
 
-/**
- * Main chart renderer. Takes chart type + x/y data and renders the appropriate chart.
- */
+// ─── Axis Label Wrapper ───────────────────────────────────────────────────────
+// Wraps a chart with visible X and Y axis titles
+
+const AxisLabels = ({ xLabel, yLabel, children }) => (
+  <View style={axisStyles.container}>
+    {/* Y-axis label (rotated vertically) */}
+    <View style={axisStyles.yLabelContainer}>
+      <Text style={axisStyles.yLabel} numberOfLines={1}>
+        {yLabel}
+      </Text>
+    </View>
+
+    <View style={axisStyles.chartArea}>
+      {children}
+      {/* X-axis label */}
+      <View style={axisStyles.xLabelContainer}>
+        <Text style={axisStyles.xLabel} numberOfLines={1}>
+          {xLabel}
+        </Text>
+      </View>
+    </View>
+  </View>
+);
+
+const axisStyles = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  yLabelContainer: {
+    width: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 2,
+  },
+  yLabel: {
+    fontSize: 11,
+    color: '#6200ee',
+    fontWeight: '600',
+    transform: [{ rotate: '-90deg' }],
+    width: 80,
+    textAlign: 'center',
+  },
+  chartArea: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  xLabelContainer: {
+    marginTop: 4,
+    alignItems: 'center',
+    width: '100%',
+  },
+  xLabel: {
+    fontSize: 11,
+    color: '#6200ee',
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+});
+
+// ─── Download Button ──────────────────────────────────────────────────────────
+
+const DownloadButton = ({ onPress, loading }) => (
+  <TouchableOpacity
+    style={dlStyles.btn}
+    onPress={onPress}
+    activeOpacity={0.75}
+    disabled={loading}
+  >
+    {loading ? (
+      <ActivityIndicator size={14} color="#fff" />
+    ) : (
+      <Text style={dlStyles.label}>⬇  Save Chart</Text>
+    )}
+  </TouchableOpacity>
+);
+
+const dlStyles = StyleSheet.create({
+  btn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#6200ee',
+    borderRadius: 20,
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    alignSelf: 'flex-end',
+    marginTop: 10,
+    shadowColor: '#6200ee',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  label: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
+});
+
+// ─── Main ChartRenderer ───────────────────────────────────────────────────────
+
 const ChartRenderer = ({
   chartType,
   xData,
   yData,
-  xLabel = 'X',
-  yLabel = 'Y',
+  xLabel = 'X Axis',
+  yLabel = 'Y Axis',
   title,
 }) => {
-  // Downsample very large datasets for performance and readability
+  const viewShotRef = useRef(null);
+  const [saving, setSaving] = useState(false);
+
+  // Downsample for performance
   const { xData: sampledX, yData: sampledY } = useMemo(() => {
-    const maxPoints = chartType === 'pie' ? 8 : 20;
+    const maxPoints = chartType === 'pie' ? 8 : 15;
     return downsampleData(xData, yData, maxPoints);
   }, [xData, yData, chartType]);
 
-  // Guard against empty data
+  // Guard
   if (!sampledX || sampledX.length === 0) {
     return (
       <Surface style={styles.emptyChart} elevation={1}>
@@ -72,60 +191,108 @@ const ChartRenderer = ({
     );
   }
 
-  const chartWidth = screenWidth - 48;
-  const chartHeight = 240;
+  // ── Sizing ──
+  // Leave room for Y-axis label (20px) + padding
+  const chartWidth = screenWidth - 72;
+  const chartHeight = 220;
 
-  // Prepare labels - trim them so the X-axis doesn't overflow
   const labels = sampledX.map((l) => truncateLabel(l, 6));
 
-  // Common data shape for line/bar/area
   const lineBarData = {
     labels,
     datasets: [
       {
         data: sampledY,
         color: (opacity = 1) => `rgba(98, 0, 238, ${opacity})`,
-        strokeWidth: 2,
+        strokeWidth: 2.5,
       },
     ],
     legend: [yLabel],
   };
 
+  // ── Save / Share ──
+  const handleSave = async () => {
+    try {
+      setSaving(true);
+
+      // Capture chart as PNG
+      const uri = await viewShotRef.current.capture({
+        format: 'png',
+        quality: 1,
+      });
+
+      const canShare = await Sharing.isAvailableAsync();
+
+      if (canShare) {
+        // Share sheet (works on both iOS and Android)
+        await Sharing.shareAsync(uri, {
+          mimeType: 'image/png',
+          dialogTitle: `Share ${title || 'Chart'}`,
+        });
+      } else {
+        // Fallback: save to device gallery
+        const { status } = await MediaLibrary.requestPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission required', 'Allow media access to save charts.');
+          return;
+        }
+        const asset = await MediaLibrary.createAssetAsync(uri);
+        await MediaLibrary.createAlbumAsync('DataVizApp', asset, false);
+        Alert.alert('Saved!', 'Chart saved to your gallery (DataVizApp album).');
+      }
+    } catch (err) {
+      console.error('Save error:', err);
+      Alert.alert('Error', 'Could not save the chart. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ── Render chart body ──
   const renderChart = () => {
     switch (chartType) {
       case 'line':
         return (
-          <LineChart
-            data={lineBarData}
-            width={chartWidth}
-            height={chartHeight}
-            chartConfig={baseChartConfig}
-            bezier
-            style={styles.chart}
-            verticalLabelRotation={30}
-            fromZero
-          />
+          <AxisLabels xLabel={xLabel} yLabel={yLabel}>
+            <LineChart
+              data={lineBarData}
+              width={chartWidth}
+              height={chartHeight}
+              chartConfig={baseChartConfig}
+              bezier
+              style={styles.chart}
+              verticalLabelRotation={30}
+              fromZero
+              withShadow={false}
+              withInnerLines={true}
+              withOuterLines={true}
+              segments={5}
+            />
+          </AxisLabels>
         );
 
       case 'bar':
         return (
-          <BarChart
-            data={lineBarData}
-            width={chartWidth}
-            height={chartHeight}
-            chartConfig={{
-              ...baseChartConfig,
-              barPercentage: 0.6,
-            }}
-            style={styles.chart}
-            verticalLabelRotation={30}
-            fromZero
-            showValuesOnTopOfBars={false}
-          />
+          <AxisLabels xLabel={xLabel} yLabel={yLabel}>
+            <BarChart
+              data={lineBarData}
+              width={chartWidth}
+              height={chartHeight}
+              chartConfig={{
+                ...baseChartConfig,
+                barPercentage: sampledX.length > 8 ? 0.4 : 0.6,
+              }}
+              style={styles.chart}
+              verticalLabelRotation={sampledX.length > 6 ? 35 : 0}
+              fromZero
+              showValuesOnTopOfBars={sampledX.length <= 8}
+              withInnerLines={true}
+              segments={5}
+            />
+          </AxisLabels>
         );
 
       case 'pie': {
-        // Aggregate y values by x to build pie slices
         const aggregated = {};
         sampledX.forEach((x, i) => {
           const key = String(x);
@@ -134,57 +301,63 @@ const ChartRenderer = ({
 
         const pieData = Object.entries(aggregated).map(([name, value], idx) => ({
           name: truncateLabel(name, 10),
-          population: Math.abs(value), // Pie chart requires positive values
+          population: Math.abs(value),
           color: PIE_COLORS[idx % PIE_COLORS.length],
-          legendFontColor: '#333',
-          legendFontSize: 12,
+          legendFontColor: '#444',
+          legendFontSize: 11,
         }));
 
         return (
-          <PieChart
-            data={pieData}
-            width={chartWidth}
-            height={chartHeight}
-            chartConfig={baseChartConfig}
-            accessor="population"
-            backgroundColor="transparent"
-            paddingLeft="15"
-            absolute={false}
-            style={styles.chart}
-          />
+          <View style={styles.pieCentred}>
+            <PieChart
+              data={pieData}
+              width={chartWidth + 20}
+              height={chartHeight}
+              chartConfig={baseChartConfig}
+              accessor="population"
+              backgroundColor="transparent"
+              paddingLeft="10"
+              absolute={false}
+              style={styles.chart}
+              hasLegend={true}
+            />
+          </View>
         );
       }
 
       case 'area':
-        // Area is a filled line chart in react-native-chart-kit
         return (
-          <LineChart
-            data={lineBarData}
-            width={chartWidth}
-            height={chartHeight}
-            chartConfig={{
-              ...baseChartConfig,
-              fillShadowGradient: '#6200ee',
-              fillShadowGradientOpacity: 0.4,
-            }}
-            bezier
-            style={styles.chart}
-            verticalLabelRotation={30}
-            fromZero
-          />
+          <AxisLabels xLabel={xLabel} yLabel={yLabel}>
+            <LineChart
+              data={lineBarData}
+              width={chartWidth}
+              height={chartHeight}
+              chartConfig={{
+                ...baseChartConfig,
+                fillShadowGradient: '#6200ee',
+                fillShadowGradientOpacity: 0.35,
+              }}
+              bezier
+              style={styles.chart}
+              verticalLabelRotation={30}
+              fromZero
+              withShadow={false}
+              segments={5}
+            />
+          </AxisLabels>
         );
 
       case 'scatter':
         return (
-          <ScatterPlot
-            xData={sampledY.map((_, i) => i)} // Use index as numeric X for scatter
-            yData={sampledY}
-            labels={labels}
-            width={chartWidth}
-            height={chartHeight}
-            xLabel={xLabel}
-            yLabel={yLabel}
-          />
+          <AxisLabels xLabel={xLabel} yLabel={yLabel}>
+            <ScatterPlot
+              xData={sampledY.map((_, i) => i)}
+              yData={sampledY}
+              labels={labels}
+              width={chartWidth}
+              height={chartHeight}
+            />
+          </AxisLabels>
         );
 
       default:
@@ -196,26 +369,48 @@ const ChartRenderer = ({
 
   return (
     <Surface style={styles.chartContainer} elevation={2}>
-      {title ? (
-        <Text variant="titleMedium" style={styles.chartTitle}>
-          {title}
-        </Text>
-      ) : null}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        {renderChart()}
-      </ScrollView>
+      {/* Title row */}
+      <View style={styles.titleRow}>
+        {title ? (
+          <Text variant="titleMedium" style={styles.chartTitle} numberOfLines={2}>
+            {title}
+          </Text>
+        ) : null}
+      </View>
+
+      {/* Chart captured by ViewShot */}
+      <ViewShot
+        ref={viewShotRef}
+        options={{ format: 'png', quality: 1 }}
+        style={styles.viewShot}
+      >
+        {/* White background so PNG looks clean */}
+        <View style={styles.captureBackground}>
+          {title ? (
+            <Text style={styles.captureTitle}>{title}</Text>
+          ) : null}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.scrollContent}
+          >
+            {renderChart()}
+          </ScrollView>
+        </View>
+      </ViewShot>
+
+      {/* Download / Share button */}
+      <DownloadButton onPress={handleSave} loading={saving} />
     </Surface>
   );
 };
 
-/**
- * Custom scatter plot built with react-native-svg since chart-kit doesn't
- * provide a true scatter. Plots points on a simple coordinate grid.
- */
-const ScatterPlot = ({ xData, yData, width, height, xLabel, yLabel }) => {
+// ─── Custom Scatter Plot ──────────────────────────────────────────────────────
+
+const ScatterPlot = ({ xData, yData, width, height }) => {
   if (!xData.length || !yData.length) return null;
 
-  const padding = { top: 20, right: 20, bottom: 40, left: 50 };
+  const padding = { top: 24, right: 20, bottom: 36, left: 48 };
   const plotW = width - padding.left - padding.right;
   const plotH = height - padding.top - padding.bottom;
 
@@ -230,14 +425,18 @@ const ScatterPlot = ({ xData, yData, width, height, xLabel, yLabel }) => {
   const scaleX = (v) => padding.left + ((v - xMin) / xRange) * plotW;
   const scaleY = (v) => padding.top + plotH - ((v - yMin) / yRange) * plotH;
 
-  // Build grid ticks (4 per axis)
   const xTicks = [0, 1, 2, 3, 4].map((i) => xMin + (i / 4) * xRange);
   const yTicks = [0, 1, 2, 3, 4].map((i) => yMin + (i / 4) * yRange);
+
+  const fmt = (v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : Number.isInteger(v) ? v : v.toFixed(1));
 
   return (
     <Svg width={width} height={height}>
       <G>
-        {/* Grid lines */}
+        {/* Background */}
+        <Rect x={padding.left} y={padding.top} width={plotW} height={plotH} fill="#faf8ff" rx={6} />
+
+        {/* Horizontal grid lines */}
         {yTicks.map((t, i) => (
           <Line
             key={`hg-${i}`}
@@ -245,11 +444,13 @@ const ScatterPlot = ({ xData, yData, width, height, xLabel, yLabel }) => {
             y1={scaleY(t)}
             x2={padding.left + plotW}
             y2={scaleY(t)}
-            stroke="#e0e0e0"
-            strokeDasharray="4 4"
+            stroke="#ede8f8"
+            strokeDasharray="5 4"
             strokeWidth={1}
           />
         ))}
+
+        {/* Vertical grid lines */}
         {xTicks.map((t, i) => (
           <Line
             key={`vg-${i}`}
@@ -257,90 +458,94 @@ const ScatterPlot = ({ xData, yData, width, height, xLabel, yLabel }) => {
             y1={padding.top}
             x2={scaleX(t)}
             y2={padding.top + plotH}
-            stroke="#e0e0e0"
-            strokeDasharray="4 4"
+            stroke="#ede8f8"
+            strokeDasharray="5 4"
             strokeWidth={1}
           />
         ))}
 
-        {/* Axes */}
-        <Line
-          x1={padding.left}
-          y1={padding.top}
-          x2={padding.left}
-          y2={padding.top + plotH}
-          stroke="#333"
-          strokeWidth={1.5}
-        />
-        <Line
-          x1={padding.left}
-          y1={padding.top + plotH}
-          x2={padding.left + plotW}
-          y2={padding.top + plotH}
-          stroke="#333"
-          strokeWidth={1.5}
-        />
+        {/* Y-axis */}
+        <Line x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top + plotH} stroke="#bbb" strokeWidth={1.5} />
+        {/* X-axis */}
+        <Line x1={padding.left} y1={padding.top + plotH} x2={padding.left + plotW} y2={padding.top + plotH} stroke="#bbb" strokeWidth={1.5} />
 
-        {/* Y-axis tick labels */}
+        {/* Y tick labels */}
         {yTicks.map((t, i) => (
-          <SvgText
-            key={`yl-${i}`}
-            x={padding.left - 6}
-            y={scaleY(t) + 4}
-            fontSize={10}
-            fill="#555"
-            textAnchor="end"
-          >
-            {Number.isInteger(t) ? t : t.toFixed(1)}
+          <SvgText key={`yl-${i}`} x={padding.left - 6} y={scaleY(t) + 4} fontSize={9} fill="#777" textAnchor="end">
+            {fmt(t)}
           </SvgText>
         ))}
 
-        {/* X-axis tick labels */}
+        {/* X tick labels */}
         {xTicks.map((t, i) => (
-          <SvgText
-            key={`xl-${i}`}
-            x={scaleX(t)}
-            y={padding.top + plotH + 16}
-            fontSize={10}
-            fill="#555"
-            textAnchor="middle"
-          >
-            {Number.isInteger(t) ? t : t.toFixed(1)}
+          <SvgText key={`xl-${i}`} x={scaleX(t)} y={padding.top + plotH + 14} fontSize={9} fill="#777" textAnchor="middle">
+            {fmt(t)}
           </SvgText>
         ))}
 
-        {/* Data points */}
+        {/* Data points with a subtle drop-shadow ring */}
         {xData.map((x, i) => (
-          <Circle
-            key={`pt-${i}`}
-            cx={scaleX(x)}
-            cy={scaleY(yData[i])}
-            r={4}
-            fill="#6200ee"
-            opacity={0.75}
-          />
+          <G key={`pt-${i}`}>
+            <Circle cx={scaleX(x)} cy={scaleY(yData[i])} r={6} fill="#6200ee" opacity={0.15} />
+            <Circle cx={scaleX(x)} cy={scaleY(yData[i])} r={4} fill="#6200ee" opacity={0.85} />
+          </G>
         ))}
       </G>
     </Svg>
   );
 };
 
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   chartContainer: {
     backgroundColor: '#fff',
-    borderRadius: 16,
+    borderRadius: 20,
     padding: 16,
-    marginVertical: 8,
-    alignItems: 'center',
+    marginVertical: 10,
+    marginHorizontal: 4,
+    shadowColor: '#6200ee',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 10,
   },
   chartTitle: {
     fontWeight: '700',
     color: '#1a1a1a',
-    marginBottom: 12,
-    alignSelf: 'flex-start',
+    flex: 1,
+    fontSize: 15,
+  },
+  viewShot: {
+    borderRadius: 14,
+    overflow: 'hidden',
+  },
+  captureBackground: {
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 4,
+  },
+  captureTitle: {
+    fontWeight: '700',
+    color: '#1a1a1a',
+    fontSize: 14,
+    marginBottom: 8,
+    paddingHorizontal: 8,
+  },
+  scrollContent: {
+    paddingRight: 12,
   },
   chart: {
     borderRadius: 12,
+  },
+  pieCentred: {
+    alignItems: 'center',
   },
   emptyChart: {
     backgroundColor: '#fff',
@@ -350,8 +555,9 @@ const styles = StyleSheet.create({
     marginVertical: 8,
   },
   emptyText: {
-    color: '#999',
+    color: '#aaa',
     fontStyle: 'italic',
+    fontSize: 13,
   },
 });
 
